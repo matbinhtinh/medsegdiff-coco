@@ -1,12 +1,15 @@
 """
 Shared helpers for the COCO-Stuff joint colorization + segmentation variant of MedSegDiff.
 
-Channel layout of the network input x (11 channels):
-    x[:, 0:1]   clean condition: L (Lab) in [-1, 1]
-    x[:, 1:3]   noisy ab
-    x[:, 3:11]  noisy analog label bits
-Main (diffusion) output: eps for the 10 target channels.
-Highway / calibration output (cal, 185 channels): 183 segmentation logits + 2 deterministic ab.
+Default design (chosen from the overfitting experiments, see README_coco.md):
+    network input  = [L (1), noisy ab (2)]                      (+ x0 estimate if --self_cond)
+    diffusion      = ab colors only, x0-prediction, cosine schedule
+    main output    = x0 for ab (2) + 183 segmentation logits (main-UNet head, CE at every noise level)
+    highway (cal)  = ImageNet-pretrained ResNet-50 condition encoder (MedSegDiff anchors) with
+                     183 segmentation logits + 2 deterministic ab
+    final label    = argmax(mean main-UNet probabilities over sampling steps + highway probabilities)
+The original analog-bit label diffusion is still available with --target_ch 10
+(input [L, ab, 8 label bits]); it learns segmentation far more slowly.
 """
 import torch as th
 import torch.nn.functional as F
@@ -16,7 +19,7 @@ from .script_util import model_and_diffusion_defaults
 from .utils import bits2int
 
 AB_CH = 2
-TARGET_CH = AB_CH + N_BITS            # 10
+TARGET_CH = AB_CH                     # color-only diffusion (AB_CH + N_BITS = 10 for analog bits)
 COND_CH = 1
 CAL_CH = NUM_CLASSES + AB_CH          # 185
 
@@ -31,13 +34,15 @@ def coco_model_and_diffusion_defaults():
         attention_resolutions="16,8",
         use_checkpoint=True,
         use_scale_shift_norm=True,
-        in_ch=COND_CH + TARGET_CH,
+        in_ch=COND_CH + TARGET_CH,    # recomputed by coco_train.py from cond_ch/target_ch/self_cond
         target_ch=TARGET_CH,
         cal_ch=CAL_CH,
         cond_ch=COND_CH,
+        seg_ch=NUM_CLASSES,
+        highway="resnet50",
         version="new",
-        # eps-prediction gives almost no learning signal at high noise for analog bits
-        # (eps ~= x_t there); predicting x0 forces the model to infer labels/colors from L
+        # eps-prediction gives almost no learning signal at high noise (eps ~= x_t there);
+        # predicting x0 forces the model to infer colors/labels from L
         predict_xstart=True,
         noise_schedule="cosine",
     )
