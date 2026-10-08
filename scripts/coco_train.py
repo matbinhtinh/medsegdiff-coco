@@ -67,6 +67,7 @@ def create_argparser():
         schedule_sampler="uniform",
         lr=1e-4,
         hw_lr_mult=5.0,           # lr multiplier for the highway (cal) head
+        hw_enc_lr_mult=1.0,       # lr multiplier for a pretrained highway encoder (--highway resnet50)
         lr_schedule="constant",   # constant | cosine (cosine needs total_steps)
         warmup_steps=1000,
         total_steps=0,
@@ -284,9 +285,11 @@ def main():
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion, maxt=args.diffusion_steps)
 
     hw_ids = {id(p) for p in model.hwm.parameters()}
+    enc_ids = {id(p) for p in model.hwm.encoder_parameters()} if hasattr(model.hwm, "encoder_parameters") else set()
     opt = AdamW(
         [{"params": [p for p in model.parameters() if id(p) not in hw_ids], "lr_mult": 1.0},
-         {"params": list(model.hwm.parameters()), "lr_mult": args.hw_lr_mult}],
+         {"params": [p for p in model.hwm.parameters() if id(p) not in enc_ids], "lr_mult": args.hw_lr_mult},
+         {"params": [p for p in model.hwm.parameters() if id(p) in enc_ids], "lr_mult": args.hw_enc_lr_mult}],
         lr=args.lr, weight_decay=args.weight_decay,
     )
     scaler = th.amp.GradScaler("cuda", enabled=amp_dtype == th.float16)

@@ -852,6 +852,7 @@ class UNetModel_newpreview(nn.Module):
         cal_channels=1,
         cal_nonlin=None,
         seg_channels=0,
+        highway="nnunet",
     ):
         super().__init__()
         # >0: extra segmentation logits predicted from the main UNet's final features,
@@ -1052,9 +1053,13 @@ class UNetModel_newpreview(nn.Module):
             # the original binary setup keeps nnUNet's Dropout2d(p=0.5) in the encoder; it cripples
             # a dense multi-class head, so it is disabled when cal_channels > 1
             hw_dropout = {'p': 0.5 if cal_channels == 1 else 0.0, 'inplace': True}
-            self.hwm = Generic_UNet(self.cond_channels, features, cal_channels, 5, anchor_out=True,
-                                    upscale_logits=True, final_nonlin=cal_nonlin,
-                                    dropout_op_kwargs=hw_dropout)
+            if highway == "nnunet":
+                self.hwm = Generic_UNet(self.cond_channels, features, cal_channels, 5, anchor_out=True,
+                                        upscale_logits=True, final_nonlin=cal_nonlin,
+                                        dropout_op_kwargs=hw_dropout)
+            else:  # e.g. "resnet50": ImageNet-pretrained encoder, same (anchors, cal) interface
+                from .pretrained_highway import PretrainedHighway
+                self.hwm = PretrainedHighway(self.cond_channels, cal_channels, arch=highway)
 
     def convert_to_fp16(self):
         """
