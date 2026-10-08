@@ -73,7 +73,7 @@ def main():
         model, _ = create_model_and_diffusion(**margs)
         model.load_state_dict(weights)
         model.to(dev).eval()
-        keys = ["cal", "diff", "soft"] + (["main_first", "main_mean"] if margs.get("seg_ch") else [])
+        keys = ["cal", "diff", "soft"] + (["main_first", "main_mean", "ens"] if margs.get("seg_ch") else [])
         res = {k: [] for k in keys}
         col = {k: [] for k in keys}
         for b in batches:
@@ -88,7 +88,8 @@ def main():
             for k, lab_key, ab_key in (("cal", "label_cal", "ab_cal"), ("diff", "label_diff", "ab_diff"),
                                        ("soft", "label_soft", "ab"),
                                        ("main_first", "label_main_first", "ab"),
-                                       ("main_mean", "label_main_mean", "ab")):
+                                       ("main_mean", "label_main_mean", "ab"),
+                                       ("ens", "label_ens", "ab")):
                 if k not in res:
                     continue
                 for pr, g in zip(pred[lab_key].cpu().numpy(), gt):

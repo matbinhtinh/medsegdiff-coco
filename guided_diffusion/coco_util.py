@@ -100,7 +100,11 @@ def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5, beta_bits=1.0, seg=No
             probs = seg[key].float().clone()
             probs[:, 0] = 0
             out[f"label_main_{key}"] = probs.argmax(dim=1)
-        out["label"] = out["label_main_mean"]
+        # ensemble: main-UNet probabilities (averaged over sampling steps) + highway probabilities
+        ens = seg["mean"].float() + logp.exp()
+        ens[:, 0] = 0
+        out["label_ens"] = ens.argmax(dim=1)
+        out["label"] = out["label_ens"]
     return out
 
 
