@@ -384,13 +384,16 @@ def main():
     while True:
         if args.max_steps and step >= args.max_steps:
             break
-        if args.max_hours and (time.time() - t_start) / 3600 >= args.max_hours:
+        # every rank must take the same decision, otherwise one rank waits forever in an all-reduce:
+        # the time limit is judged on rank 0's clock, SIGTERM on any rank
+        out_of_time = is_main and args.max_hours and (time.time() - t_start) / 3600 >= args.max_hours
+        flags = th.tensor([1.0 if out_of_time else 0.0, 1.0 if stop["flag"] else 0.0], device=dev)
+        if dist.is_initialized():
+            dist.all_reduce(flags)
+        if flags[0].item() > 0:
             log("max_hours reached")
             break
-        stop_now = th.tensor([1.0 if stop["flag"] else 0.0], device=dev)
-        if dist.is_initialized():
-            dist.all_reduce(stop_now)
-        if stop_now.item() > 0:
+        if flags[1].item() > 0:
             log("SIGTERM received")
             break
 
