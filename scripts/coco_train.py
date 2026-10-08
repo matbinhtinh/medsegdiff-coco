@@ -124,6 +124,13 @@ class ResumableSampler(DistributedSampler):
         return self.num_samples - self.start
 
 
+def _worker_init(_):
+    # DataLoader workers share the command line of the trainer, so `pkill`/Kaggle shutdown also
+    # signals them; let only the main process react (it saves a checkpoint, then exits)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def setup_dist():
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         dist.init_process_group("nccl")
@@ -266,7 +273,7 @@ def main():
                        augment=args.augment, max_items=args.max_items or None)
     sampler = ResumableSampler(ds, num_replicas=world, rank=rank, shuffle=True, seed=args.seed, drop_last=True)
     loader = DataLoader(ds, batch_size=args.batch_size, sampler=sampler, drop_last=True,
-                        num_workers=args.num_workers, pin_memory=True,
+                        num_workers=args.num_workers, pin_memory=True, worker_init_fn=_worker_init,
                         persistent_workers=args.num_workers > 0,
                         prefetch_factor=4 if args.num_workers > 0 else None)
     steps_per_epoch = len(sampler) // args.batch_size // args.grad_accum
@@ -354,6 +361,7 @@ def main():
 
     stop = {"flag": False}
     signal.signal(signal.SIGTERM, lambda *a: stop.update(flag=True))
+    signal.signal(signal.SIGINT, lambda *a: stop.update(flag=True))
     t_start = time.time()
     last_save = time.time()
     metrics = {}
@@ -411,9 +419,15 @@ def main():
         for g in opt.param_groups:
             g["lr"] = lr * g["lr_mult"]
         opt.zero_grad(set_to_none=True)
+        data_failed = False
         for micro in range(args.grad_accum):
             try:
                 cond, target, label, _ = next(data_iter)
+            except RuntimeError as e:  # e.g. a worker killed during shutdown: keep what we have
+                log(f"data loader failed ({e}); saving and stopping")
+                stop["flag"] = True
+                data_failed = True
+                break
             except StopIteration:
                 epoch += 1
                 epoch_batches = 0
@@ -440,6 +454,8 @@ def main():
                 sums[k] = sums.get(k, 0.0) + v.detach().mean().item()
             n_log += 1
 
+        if data_failed:
+            break
         scaler.unscale_(opt)
         grad_norm = th.nn.utils.clip_grad_norm_(raw_params, args.grad_clip if args.grad_clip > 0 else float("inf"))
         scale_before = scaler.get_scale()
