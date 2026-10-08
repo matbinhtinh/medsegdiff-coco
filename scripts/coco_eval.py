@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
-from guided_diffusion.cocostuff_loader import CocoStuffDataset, NUM_CLASSES, lab_to_rgb, load_class_names
+from guided_diffusion.cocostuff_loader import NUM_CLASSES, build_dataset, lab_to_rgb, load_class_names
 
 
 def colorfulness(rgb):
@@ -29,13 +29,13 @@ def colorfulness(rgb):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--data_dir", default="C:/Users/Admin/Downloads/cocostuff-10k-v1.1")
+    p.add_argument("--data_dir", default="/kaggle/input/datasets/dntai2/cocostuf-2017")
     p.add_argument("--pred_dir", default="./results/coco_samples")
-    p.add_argument("--split", default="test")
+    p.add_argument("--split", default="val")
     p.add_argument("--image_size", type=int, default=256)
     args = p.parse_args()
 
-    ds = CocoStuffDataset(args.data_dir, args.split, args.image_size, augment=False)
+    ds = build_dataset(args.data_dir, args.split, args.image_size, augment=False)
     conf = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
     psnr, ssim, cf_pred, cf_gt = [], [], [], []
     n = 0

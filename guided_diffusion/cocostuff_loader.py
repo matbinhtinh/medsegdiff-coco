@@ -1,11 +1,18 @@
 """
-COCO-Stuff 10k (v1.1) loader for joint colorization + semantic segmentation.
+COCO-Stuff loaders for joint colorization + semantic segmentation.
 
-Layout expected under `root`:
+Two on-disk formats are supported (auto-detected by `build_dataset`):
+
+* COCO-Stuff 10k (v1.1):
     images/<name>.jpg
     annotations/<name>.mat      (key 'S': uint8 HxW, 0 = unlabeled, 1..182 = classes)
     imageLists/{train,test,all}.txt
+* COCO-Stuff 164k (2017):
+    train2017/[train2017/]<id>.jpg, val2017/[val2017/]<id>.jpg
+    stuffthingmaps_trainval2017/{train2017,val2017}/<id>.png   (0..181 = classes, 255 = unlabeled)
+    cocostuff-labels.txt         ("0: unlabeled", "1: person", ...)
 
+Both are mapped to the same label space: 0 = unlabeled, 1..182 = COCO-Stuff ids.
 Each sample is returned as
     cond   [1, H, W]   L channel (Lab) scaled to [-1, 1]
     target [2 + n_bits, H, W]  ab / AB_SCALE (≈[-1, 1]) followed by analog label bits in {-1, 1}
@@ -29,8 +36,24 @@ N_BITS = 8          # ceil(log2(183))
 AB_SCALE = 110.0
 
 
+def detect_format(root):
+    if os.path.isdir(os.path.join(root, "imageLists")):
+        return "10k"
+    if os.path.isdir(os.path.join(root, "stuffthingmaps_trainval2017")):
+        return "164k"
+    raise ValueError(f"unknown COCO-Stuff layout in {root}")
+
+
 def load_class_names(root):
     """Return the 182 class names (index i -> label id i + 1)."""
+    if detect_format(root) == "164k":
+        names = {}
+        with open(os.path.join(root, "cocostuff-labels.txt")) as f:
+            for line in f:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    names[int(k)] = v.strip()
+        return [names.get(i, str(i)) for i in range(1, NUM_CLASSES)]
     lst = os.path.join(root, "imageLists", "train.txt")
     with open(lst) as f:
         first = f.readline().strip()
@@ -53,18 +76,20 @@ def label_palette(num_classes=NUM_CLASSES, seed=0):
     return pal
 
 
-class CocoStuffDataset(Dataset):
-    def __init__(self, root, split="train", image_size=256, augment=None, max_items=None):
-        self.root = root
+class _CocoStuffBase(Dataset):
+    """Shared crop / augmentation / Lab conversion. Subclasses implement _load(name)."""
+
+    def __init__(self, image_size=256, augment=False):
         self.image_size = image_size
-        self.augment = (split == "train") if augment is None else augment
-        with open(os.path.join(root, "imageLists", f"{split}.txt")) as f:
-            self.names = [l.strip() for l in f if l.strip()]
-        if max_items:
-            self.names = self.names[:max_items]
+        self.augment = augment
+        self.names = []
 
     def __len__(self):
         return len(self.names)
+
+    def _load(self, name):
+        """-> (PIL RGB image, PIL 'L' label map with ids 0..182)"""
+        raise NotImplementedError
 
     def _resize_crop(self, img, lab):
         size = self.image_size
@@ -90,9 +115,7 @@ class CocoStuffDataset(Dataset):
 
     def __getitem__(self, idx):
         name = self.names[idx]
-        img = Image.open(os.path.join(self.root, "images", name + ".jpg")).convert("RGB")
-        S = scipy.io.loadmat(os.path.join(self.root, "annotations", name + ".mat"))["S"]
-        lab = Image.fromarray(S.astype(np.uint8))
+        img, lab = self._load(name)
         img, lab = self._resize_crop(img, lab)
 
         rgb = np.asarray(img, dtype=np.float32) / 255.0
@@ -106,3 +129,50 @@ class CocoStuffDataset(Dataset):
         ab = torch.from_numpy(ab.transpose(2, 0, 1).copy())
         target = torch.cat([ab, int2bits(label, N_BITS)], dim=0)
         return cond, target, label, name
+
+
+class CocoStuffDataset(_CocoStuffBase):
+    """COCO-Stuff 10k v1.1 (splits: train / test / all)."""
+
+    def __init__(self, root, split="train", image_size=256, augment=None, max_items=None):
+        super().__init__(image_size, (split == "train") if augment is None else augment)
+        self.root = root
+        with open(os.path.join(root, "imageLists", f"{split}.txt")) as f:
+            self.names = [l.strip() for l in f if l.strip()]
+        if max_items:
+            self.names = self.names[:max_items]
+
+    def _load(self, name):
+        img = Image.open(os.path.join(self.root, "images", name + ".jpg")).convert("RGB")
+        S = scipy.io.loadmat(os.path.join(self.root, "annotations", name + ".mat"))["S"]
+        return img, Image.fromarray(S.astype(np.uint8))
+
+
+class CocoStuff164kDataset(_CocoStuffBase):
+    """COCO-Stuff 164k / 2017 (splits: train / val)."""
+
+    def __init__(self, root, split="train", image_size=256, augment=None, max_items=None):
+        super().__init__(image_size, (split == "train") if augment is None else augment)
+        split = {"test": "val"}.get(split, split)
+        self.root = root
+        img_dir = os.path.join(root, f"{split}2017")
+        nested = os.path.join(img_dir, f"{split}2017")
+        self.img_dir = nested if os.path.isdir(nested) else img_dir
+        self.lab_dir = os.path.join(root, "stuffthingmaps_trainval2017", f"{split}2017")
+        self.names = sorted(f[:-4] for f in os.listdir(self.lab_dir) if f.endswith(".png"))
+        if max_items:
+            self.names = self.names[:max_items]
+        # PNG value v (0..181) -> id v + 1; 255 (unlabeled) -> 0
+        lut = np.zeros(256, dtype=np.uint8)
+        lut[:NUM_CLASSES - 1] = np.arange(1, NUM_CLASSES, dtype=np.uint8)
+        self.lut = lut
+
+    def _load(self, name):
+        img = Image.open(os.path.join(self.img_dir, name + ".jpg")).convert("RGB")
+        lab = np.asarray(Image.open(os.path.join(self.lab_dir, name + ".png")))
+        return img, Image.fromarray(self.lut[lab])
+
+
+def build_dataset(root, split="train", image_size=256, augment=None, max_items=None):
+    cls = CocoStuff164kDataset if detect_format(root) == "164k" else CocoStuffDataset
+    return cls(root, split, image_size, augment=augment, max_items=max_items)

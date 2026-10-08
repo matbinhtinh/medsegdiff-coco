@@ -19,8 +19,8 @@ import numpy as np
 import torch as th
 from PIL import Image
 
-from guided_diffusion import logger
-from guided_diffusion.cocostuff_loader import CocoStuffDataset, lab_to_rgb, label_palette
+from guided_diffusion import coco_ckpt, logger
+from guided_diffusion.cocostuff_loader import build_dataset, lab_to_rgb, label_palette
 from guided_diffusion.coco_util import coco_model_and_diffusion_defaults, fuse_predictions, sample_joint
 from guided_diffusion.script_util import (
     add_dict_to_argparser,
@@ -32,9 +32,10 @@ from guided_diffusion.script_util import (
 
 def create_argparser():
     defaults = dict(
-        data_dir="C:/Users/Admin/Downloads/cocostuff-10k-v1.1",
-        split="test",
-        model_path="",
+        data_dir="/kaggle/input/datasets/dntai2/cocostuf-2017",
+        split="val",              # "test" for COCO-Stuff 10k
+        model_path="",            # checkpoint (.pt), local path or URL / Google Drive link
+        use_ema=True,             # EMA weights when the checkpoint has them
         out_dir="./results/coco_samples",
         num_samples=0,            # 0 = whole split
         batch_size=4,
@@ -42,7 +43,7 @@ def create_argparser():
         eta=0.0,                  # 0 = DDIM (deterministic), 1 = ancestral-like
         alpha_seg=0.5,            # weight of the diffusion label vote in the fused segmentation
         w_ab=0.5,                 # weight of the highway ab in the fused colors
-        bf16=True,
+        precision="auto",        # auto | bf16 | fp16 | fp32
         seed=0,
     )
     defaults.update(coco_model_and_diffusion_defaults())
@@ -60,14 +61,27 @@ def main():
         os.makedirs(os.path.join(args.out_dir, sub), exist_ok=True)
     logger.configure(dir=args.out_dir, format_strs=["stdout", "log"])
 
+    path = args.model_path
+    if coco_ckpt.is_url(path):
+        path = coco_ckpt.download(path, os.path.join(args.out_dir, "_download"))
+    ckpt = coco_ckpt.load(path)
+    for k, v in (ckpt.get("args") or {}).items():  # architecture from the checkpoint
+        if k in model_and_diffusion_defaults() and k != "timestep_respacing":
+            setattr(args, k, v)
+    logger.log(f"checkpoint {path}: step {ckpt.get('step')} epoch {ckpt.get('epoch')}")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
-    model.load_state_dict(th.load(args.model_path, map_location="cpu"))
+    model.load_state_dict(coco_ckpt.model_weights(ckpt, use_ema=args.use_ema))
     model.to(dev).eval()
+    ckpt = None
+    amp = None
+    if dev.type == "cuda" and args.precision != "fp32":
+        amp = {"bf16": th.bfloat16, "fp16": th.float16}.get(args.precision) or (
+            th.bfloat16 if th.cuda.get_device_capability()[0] >= 8 else th.float16)
 
-    ds = CocoStuffDataset(args.data_dir, args.split, args.image_size, augment=False,
-                          max_items=args.num_samples or None)
+    ds = build_dataset(args.data_dir, args.split, args.image_size, augment=False,
+                       max_items=args.num_samples or None)
     loader = th.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
     pal = label_palette()
     logger.log(f"sampling {len(ds)} images with {diffusion.num_timesteps} steps x {args.num_ensemble} ensemble")
@@ -75,7 +89,7 @@ def main():
     for cond, target, label, names in loader:
         cond = cond.to(dev)
         samples, cals = [], []
-        with th.autocast(device_type=dev.type, dtype=th.bfloat16, enabled=args.bf16):
+        with th.autocast(device_type=dev.type, dtype=amp or th.float32, enabled=amp is not None):
             for _ in range(args.num_ensemble):
                 s, c = sample_joint(diffusion, model, cond, eta=args.eta)
                 samples.append(s.float())
