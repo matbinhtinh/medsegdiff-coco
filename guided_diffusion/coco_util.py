@@ -36,6 +36,10 @@ def coco_model_and_diffusion_defaults():
         cal_ch=CAL_CH,
         cond_ch=COND_CH,
         version="new",
+        # eps-prediction gives almost no learning signal at high noise for analog bits
+        # (eps ~= x_t there); predicting x0 forces the model to infer labels/colors from L
+        predict_xstart=True,
+        noise_schedule="cosine",
     )
     return res
 

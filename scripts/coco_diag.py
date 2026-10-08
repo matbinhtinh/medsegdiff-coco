@@ -59,7 +59,9 @@ def main():
     idx = np.linspace(0, len(ds) - 1, min(args.n, len(ds))).astype(int)
     batches = [idx[i:i + args.batch_size] for i in range(0, len(idx), args.batch_size)]
     diffusion = create_gaussian_diffusion(steps=margs["diffusion_steps"], noise_schedule=margs["noise_schedule"],
-                                          timestep_respacing=args.steps, target_channels=margs["target_ch"])
+                                          timestep_respacing=args.steps, target_channels=margs["target_ch"],
+                                          predict_xstart=margs["predict_xstart"],
+                                          rescale_timesteps=margs["rescale_timesteps"])
 
     # majority-class baseline over the evaluated images
     gts = np.stack([ds[i][2].numpy() for i in idx])
