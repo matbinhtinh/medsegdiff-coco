@@ -1055,18 +1055,33 @@ class GaussianDiffusion:
         return (terms, model_output)
 
     def training_losses_joint(self, model, cond, x_start, label, t, num_seg_classes,
-                              lambda_ce=1.0, lambda_ab=1.0, ab_channels=2, noise=None):
+                              lambda_ce=1.0, lambda_ab=1.0, ab_channels=2, noise=None,
+                              self_cond=False, self_cond_prob=0.5):
         """
         Joint colorization + segmentation loss (COCO-Stuff).
         :param cond: [N x Cc x H x W] clean condition (L channel).
         :param x_start: [N x C x H x W] diffused target = [ab (ab_channels), analog label bits].
         :param label: [N x H x W] long class map, 0 = unlabeled (ignored by the CE term).
+        :param self_cond: self-conditioning (Chen et al., Analog Bits): the network input becomes
+            [cond, x0_estimate, x_t]; x0_estimate is the model's own (detached) prediction for a
+            random subset of the batch and zeros otherwise.
         The highway (cal) head must output num_seg_classes logits followed by ab_channels colors.
         """
         if noise is None:
             noise = th.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise=noise)
-        model_output, cal = model(th.cat((cond, x_t), dim=1), self._scale_timesteps(t))
+        if self_cond:
+            x0_sc = th.zeros_like(x_start)
+            # always run the extra pass (on every rank: SyncBatchNorm needs identical collectives)
+            with th.no_grad():
+                out_sc, _ = model(th.cat((cond, x0_sc, x_t), dim=1), self._scale_timesteps(t))
+                est = self._x0_from_output(out_sc[:, :x_start.shape[1]].float(), x_t, t)
+            use = (th.rand(x_start.shape[0], device=x_start.device) < self_cond_prob).float()
+            x0_sc = (est * use.view(-1, 1, 1, 1)).detach()
+            model_input = th.cat((cond, x0_sc, x_t), dim=1)
+        else:
+            model_input = th.cat((cond, x_t), dim=1)
+        model_output, cal = model(model_input, self._scale_timesteps(t))
         model_output = model_output[:, :x_start.shape[1]].float()
         cal = cal.float()
 
@@ -1091,6 +1106,16 @@ class GaussianDiffusion:
 
         terms["loss"] = terms["loss_diff"] + lambda_ce * terms["loss_ce"] + lambda_ab * terms["loss_ab"]
         return terms
+
+    def _x0_from_output(self, model_output, x_t, t):
+        """x0 estimate (clipped to [-1, 1]) from a raw model output, for any mean type."""
+        if self.model_mean_type == ModelMeanType.START_X:
+            x0 = model_output
+        elif self.model_mean_type == ModelMeanType.EPSILON:
+            x0 = self._predict_xstart_from_eps(x_t, t, model_output)
+        else:
+            x0 = self._predict_xstart_from_xprev(x_t, t, model_output)
+        return x0.clamp(-1, 1)
 
 
     def _prior_bpd(self, x_start):

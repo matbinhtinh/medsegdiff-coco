@@ -77,6 +77,8 @@ def create_argparser():
         ema_rate="0.9999",
         lambda_ce=1.0,
         lambda_ab=1.0,
+        self_cond=False,          # self-conditioning on the previous x0 estimate (Analog Bits)
+        self_cond_prob=0.5,
         grad_clip=0.0,
         precision="auto",         # auto | bf16 | fp16 | fp32  (auto: bf16 on Ampere+, fp16 on T4/V100)
         sync_bn=True,             # SyncBatchNorm for the highway head under DDP
@@ -181,7 +183,7 @@ def lr_at(step, args):
 
 
 @th.no_grad()
-def visualize(model, vis_diffusion, vis_batch, ema_params, raw_params, dev, amp_dtype, pal):
+def visualize(model, vis_diffusion, vis_batch, ema_params, raw_params, dev, amp_dtype, pal, self_cond=False):
     """Sample the fixed visualization batch with raw and EMA weights -> (grid uint8, metrics)."""
     cond, target, label, _ = vis_batch
     cond = cond.to(dev)
@@ -197,7 +199,7 @@ def visualize(model, vis_diffusion, vis_batch, ema_params, raw_params, dev, amp_
         g = th.Generator(device=dev).manual_seed(1234)
         noise = th.randn(cond.shape[0], vis_diffusion.target_channels, *cond.shape[2:], device=dev, generator=g)
         with th.autocast(device_type=dev.type, dtype=amp_dtype or th.float32, enabled=amp_dtype is not None):
-            sample, cal = sample_joint(vis_diffusion, model, cond, noise=noise)
+            sample, cal = sample_joint(vis_diffusion, model, cond, noise=noise, self_cond=self_cond)
         pred = fuse_predictions(sample.float(), cal.float())
         rgb = lab_to_rgb(cond, pred["ab"])
         lab_pred = pred["label"].cpu().numpy()
@@ -244,8 +246,12 @@ def main():
         for k in MODEL_KEYS:
             if k in ckpt["args"] and k not in RUNTIME_KEYS:
                 setattr(args, k, ckpt["args"][k])
+        args.self_cond = ckpt["args"].get("self_cond", False)  # changes the input layout
         log(f"{'resuming' if resume_path else 'initialising'} from {resume_path or init_path} "
             f"(step {ckpt.get('step', 0)}, epoch {ckpt.get('epoch', 0)})")
+
+    # network input = [L, (x0 estimate if self_cond), x_t]
+    args.in_ch = args.cond_ch + args.target_ch * (2 if args.self_cond else 1)
 
     seed = args.seed + rank + (ckpt.get("step", 0) if ckpt and resume_path else 0)
     th.manual_seed(seed)
@@ -422,6 +428,7 @@ def main():
                     losses = diffusion.training_losses_joint(
                         ddp_model, cond, target, label, t, NUM_CLASSES,
                         lambda_ce=args.lambda_ce, lambda_ab=args.lambda_ab, ab_channels=AB_CH,
+                        self_cond=args.self_cond, self_cond_prob=args.self_cond_prob,
                     )
                 loss = (losses["loss"] * weights).mean() / args.grad_accum
                 scaler.scale(loss).backward()
@@ -471,7 +478,7 @@ def main():
         if args.vis_interval > 0 and step % args.vis_interval == 0:
             if is_main:  # other ranks wait at the barrier
                 grid, vis_metrics = visualize(model, vis_diffusion, vis_batch, ema_params[-1], raw_params,
-                                              dev, amp_dtype, pal)
+                                              dev, amp_dtype, pal, self_cond=args.self_cond)
                 Image.fromarray(grid).save(os.path.join(args.out_dir, "samples", f"step_{step:07d}.jpg"),
                                            quality=90)
                 log(" ".join(f"{k}={v:.4f}" for k, v in vis_metrics.items()))

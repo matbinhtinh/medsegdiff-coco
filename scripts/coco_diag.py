@@ -52,7 +52,8 @@ def main():
     margs = dict(model_and_diffusion_defaults())
     margs.update({k: v for k, v in ckpt["args"].items() if k in margs})
     margs["timestep_respacing"] = ""
-    print(f"checkpoint step {ckpt.get('step')} epoch {ckpt.get('epoch')}")
+    self_cond = ckpt["args"].get("self_cond", False)
+    print(f"checkpoint step {ckpt.get('step')} epoch {ckpt.get('epoch')} self_cond={self_cond}")
 
     ds = build_dataset(args.data_dir, args.split, margs["image_size"], augment=False,
                        max_items=args.max_items or None)
@@ -72,19 +73,19 @@ def main():
         model, _ = create_model_and_diffusion(**margs)
         model.load_state_dict(weights)
         model.to(dev).eval()
-        res = {k: [] for k in ("cal", "diff", "fused")}
-        col = {k: [] for k in ("cal", "diff", "fused")}
+        res = {k: [] for k in ("cal", "diff", "soft")}
+        col = {k: [] for k in ("cal", "diff", "soft")}
         for b in batches:
             items = [ds[i] for i in b]
             cond = th.stack([it[0] for it in items]).to(dev)
             target = th.stack([it[1] for it in items])
             gt = th.stack([it[2] for it in items]).numpy()
             with th.no_grad(), th.autocast("cuda", dtype=amp):
-                sample, cal = sample_joint(diffusion, model, cond)
+                sample, cal = sample_joint(diffusion, model, cond, self_cond=self_cond)
             pred = fuse_predictions(sample.float(), cal.float())
             rgb_gt = lab_to_rgb(cond, target[:, :2])
             for k, lab_key, ab_key in (("cal", "label_cal", "ab_cal"), ("diff", "label_diff", "ab_diff"),
-                                       ("fused", "label", "ab")):
+                                       ("soft", "label_soft", "ab")):
                 for pr, g in zip(pred[lab_key].cpu().numpy(), gt):
                     res[k].append(seg_scores(pr, g))
                 col[k].append(psnr(lab_to_rgb(cond, pred[ab_key]), rgb_gt))

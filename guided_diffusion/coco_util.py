@@ -49,43 +49,61 @@ def split_cal(cal):
     return cal[:, :NUM_CLASSES], cal[:, NUM_CLASSES:NUM_CLASSES + AB_CH]
 
 
-def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5):
+def bits_class_loglik(bits, k=4.0):
     """
-    Combine the diffusion sample with the highway calibration head, in the spirit of
-    MedSegDiff's `cal_out` fusion.
+    Soft decoding of analog bits: log-likelihood of every class code.
+    :param bits: [B, N_BITS, H, W] predicted analog bits in [-1, 1].
+    :return: [B, NUM_CLASSES, H, W]; each bit is treated as Bernoulli(sigmoid(k * bit)).
+    """
+    codes = ((th.arange(NUM_CLASSES, device=bits.device)[:, None]
+              >> th.arange(N_BITS - 1, -1, -1, device=bits.device)[None]) & 1).float()   # [C, N_BITS]
+    logp1 = F.logsigmoid(k * bits.float())
+    logp0 = F.logsigmoid(-k * bits.float())
+    return th.einsum("cb,bnhw->nchw", codes, logp1.transpose(0, 1)) + \
+        th.einsum("cb,bnhw->nchw", 1 - codes, logp0.transpose(0, 1))
+
+
+def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5, beta_bits=1.0):
+    """
+    Combine the diffusion sample with the highway calibration head.
+    Labels: label_cal (highway argmax), label_diff (hard bit decoding), label_soft
+    (argmax of log p_highway(c) + beta * log p_bits(c)), label (= label_soft).
+    Colors: ab_diff, ab_cal and their mix ab.
     :param sample: [B, 10, H, W] final x_0 sample (ab + analog bits).
     :param cal: [B, 185, H, W] raw highway output.
-    :return: dict with ab [B,2,H,W] and label maps [B,H,W] (diffusion / cal / fused).
     """
     seg_logits, cal_ab = split_cal(cal.float())
     diff_ab = sample[:, :AB_CH].float()
-    diff_label = bits2int(sample[:, AB_CH:], max_value=NUM_CLASSES - 1)
+    bits = sample[:, AB_CH:AB_CH + N_BITS].float()
+    diff_label = bits2int(bits, max_value=NUM_CLASSES - 1)
 
-    probs = F.softmax(seg_logits, dim=1)
-    probs[:, 0] = 0  # never predict "unlabeled"
-    onehot = F.one_hot(diff_label, NUM_CLASSES).permute(0, 3, 1, 2).float()
-    onehot[:, 0] = 0
-    fused_label = (probs + alpha_seg * onehot).argmax(dim=1)
+    logp = F.log_softmax(seg_logits, dim=1)
+    logp[:, 0] = -1e4  # never predict "unlabeled"
+    score = logp + beta_bits * bits_class_loglik(bits)
+    soft_label = score.argmax(dim=1)
 
     return {
         "ab_diff": diff_ab,
         "ab_cal": cal_ab.clamp(-1, 1),
         "ab": ((1 - w_ab) * diff_ab + w_ab * cal_ab).clamp(-1, 1),
         "label_diff": diff_label,
-        "label_cal": probs.argmax(dim=1),
-        "label": fused_label,
+        "label_cal": logp.argmax(dim=1),
+        "label_soft": soft_label,
+        "label": soft_label,
     }
 
 
 @th.no_grad()
-def sample_joint(diffusion, model, cond, eta=0.0, progress=False, noise=None):
+def sample_joint(diffusion, model, cond, eta=0.0, progress=False, noise=None, self_cond=False):
     """
     DDIM (eta=0) / DDPM-like (eta=1) sampling over the (possibly respaced) diffusion.
     :param cond: [B, 1, H, W] L channel.
+    :param self_cond: feed the previous step's x0 prediction ([cond, x0_prev, x_t] input).
     :return: (x0 sample [B, 10, H, W], cal of the last step [B, 185, H, W])
     """
     B, _, H, W = cond.shape
     x = th.randn(B, diffusion.target_channels, H, W, device=cond.device) if noise is None else noise
+    x0_prev = th.zeros_like(x)
     indices = list(range(diffusion.num_timesteps))[::-1]
     if progress:
         from tqdm.auto import tqdm
@@ -93,6 +111,8 @@ def sample_joint(diffusion, model, cond, eta=0.0, progress=False, noise=None):
     out = None
     for i in indices:
         t = th.full((B,), i, device=cond.device, dtype=th.long)
-        out = diffusion.ddim_sample(model, th.cat((cond, x), dim=1), t, clip_denoised=True, eta=eta)
+        inp = th.cat((cond, x0_prev, x), dim=1) if self_cond else th.cat((cond, x), dim=1)
+        out = diffusion.ddim_sample(model, inp, t, clip_denoised=True, eta=eta)
         x = out["sample"]
+        x0_prev = out["pred_xstart"].to(x.dtype)
     return x, out["cal"]

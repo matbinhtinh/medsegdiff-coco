@@ -68,7 +68,8 @@ def main():
     for k, v in (ckpt.get("args") or {}).items():  # architecture from the checkpoint
         if k in model_and_diffusion_defaults() and k != "timestep_respacing":
             setattr(args, k, v)
-    logger.log(f"checkpoint {path}: step {ckpt.get('step')} epoch {ckpt.get('epoch')}")
+    self_cond = (ckpt.get("args") or {}).get("self_cond", False)
+    logger.log(f"checkpoint {path}: step {ckpt.get('step')} epoch {ckpt.get('epoch')} self_cond={self_cond}")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
@@ -91,7 +92,7 @@ def main():
         samples, cals = [], []
         with th.autocast(device_type=dev.type, dtype=amp or th.float32, enabled=amp is not None):
             for _ in range(args.num_ensemble):
-                s, c = sample_joint(diffusion, model, cond, eta=args.eta)
+                s, c = sample_joint(diffusion, model, cond, eta=args.eta, self_cond=self_cond)
                 samples.append(s.float())
                 cals.append(c.float())
         sample = th.stack(samples).mean(0)
