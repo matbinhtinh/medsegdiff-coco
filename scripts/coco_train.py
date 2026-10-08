@@ -419,7 +419,7 @@ def main():
                 cond, target, label, _ = next(data_iter)
             epoch_batches += 1
             cond = cond.to(dev, non_blocking=True)
-            target = target.to(dev, non_blocking=True)
+            target = target[:, :args.target_ch].to(dev, non_blocking=True)  # target_ch=2: color-only diffusion
             label = label.to(dev, non_blocking=True)
             t, weights = schedule_sampler.sample(cond.shape[0], dev)
             sync = micro == args.grad_accum - 1 or world == 1

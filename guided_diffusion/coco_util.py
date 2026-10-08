@@ -77,13 +77,14 @@ def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5, beta_bits=1.0, seg=No
     """
     seg_logits, cal_ab = split_cal(cal.float())
     diff_ab = sample[:, :AB_CH].float()
-    bits = sample[:, AB_CH:AB_CH + N_BITS].float()
-    diff_label = bits2int(bits, max_value=NUM_CLASSES - 1)
-
     logp = F.log_softmax(seg_logits, dim=1)
     logp[:, 0] = -1e4  # never predict "unlabeled"
-    score = logp + beta_bits * bits_class_loglik(bits)
-    soft_label = score.argmax(dim=1)
+    if sample.shape[1] >= AB_CH + N_BITS:
+        bits = sample[:, AB_CH:AB_CH + N_BITS].float()
+        diff_label = bits2int(bits, max_value=NUM_CLASSES - 1)
+        soft_label = (logp + beta_bits * bits_class_loglik(bits)).argmax(dim=1)
+    else:  # color-only diffusion (target_ch = 2): no label bits
+        diff_label = soft_label = logp.argmax(dim=1)
 
     out = {
         "ab_diff": diff_ab,
