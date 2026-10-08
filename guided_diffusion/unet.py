@@ -851,8 +851,12 @@ class UNetModel_newpreview(nn.Module):
         cond_channels=None,
         cal_channels=1,
         cal_nonlin=None,
+        seg_channels=0,
     ):
         super().__init__()
+        # >0: extra segmentation logits predicted from the main UNet's final features,
+        # appended after the out_channels of the main output
+        self.seg_channels = seg_channels
 
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
@@ -1030,6 +1034,13 @@ class UNetModel_newpreview(nn.Module):
             zero_module(conv_nd(dims, model_channels , out_channels, 3, padding=1)),
         )
 
+        if seg_channels:
+            self.seg_out = nn.Sequential(
+                normalization(ch),
+                nn.SiLU(),
+                conv_nd(dims, model_channels, seg_channels, 3, padding=1),
+            )
+
         if high_way:
             features = 32
             # cond_channels: number of clean condition channels at the front of x
@@ -1119,6 +1130,8 @@ class UNetModel_newpreview(nn.Module):
             h = module(h, emb)
         h = h.type(x.dtype)
         out = self.out(h)
+        if self.seg_channels:
+            out = th.cat((out, self.seg_out(h)), dim=1)
         return out, cal
 
 

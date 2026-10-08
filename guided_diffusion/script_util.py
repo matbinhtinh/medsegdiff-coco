@@ -66,6 +66,7 @@ def model_and_diffusion_defaults():
         target_ch = 1,   # diffused channels (1 = binary mask as in MedSegDiff)
         cal_ch = 1,      # highway/calibration head channels
         cond_ch = -1,    # clean condition channels (-1 = in_ch - target_ch)
+        seg_ch = 0,      # >0: segmentation logits from the main UNet (appended to its output)
     )
     res.update(diffusion_defaults())
     return res
@@ -107,6 +108,7 @@ def create_model_and_diffusion(
     target_ch=1,
     cal_ch=1,
     cond_ch=-1,
+    seg_ch=0,
 ):
     model = create_model(
         image_size,
@@ -130,6 +132,7 @@ def create_model_and_diffusion(
         target_ch=target_ch,
         cal_ch=cal_ch,
         cond_ch=cond_ch,
+        seg_ch=seg_ch,
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -168,6 +171,7 @@ def create_model(
     target_ch=1,
     cal_ch=1,
     cond_ch=-1,
+    seg_ch=0,
 ):
     # the original code always used 2 output channels for the single mask channel
     out_ch = 2 if target_ch == 1 else target_ch
@@ -211,6 +215,7 @@ def create_model(
         use_new_attention_order=use_new_attention_order,
         cond_channels=cond_ch,
         cal_channels=cal_ch,
+        seg_channels=seg_ch,
     ) if version == 'new' else UNetModel_v1preview(
         image_size=image_size,
         in_channels=in_ch,

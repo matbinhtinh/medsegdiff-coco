@@ -77,6 +77,7 @@ def create_argparser():
         ema_rate="0.9999",
         lambda_ce=1.0,
         lambda_ab=1.0,
+        lambda_seg=1.0,           # CE weight of the main-UNet segmentation head (needs --seg_ch 183)
         self_cond=False,          # self-conditioning on the previous x0 estimate (Analog Bits)
         self_cond_prob=0.5,
         grad_clip=0.0,
@@ -199,8 +200,8 @@ def visualize(model, vis_diffusion, vis_batch, ema_params, raw_params, dev, amp_
         g = th.Generator(device=dev).manual_seed(1234)
         noise = th.randn(cond.shape[0], vis_diffusion.target_channels, *cond.shape[2:], device=dev, generator=g)
         with th.autocast(device_type=dev.type, dtype=amp_dtype or th.float32, enabled=amp_dtype is not None):
-            sample, cal = sample_joint(vis_diffusion, model, cond, noise=noise, self_cond=self_cond)
-        pred = fuse_predictions(sample.float(), cal.float())
+            sample, cal, seg = sample_joint(vis_diffusion, model, cond, noise=noise, self_cond=self_cond)
+        pred = fuse_predictions(sample.float(), cal.float(), seg=seg)
         rgb = lab_to_rgb(cond, pred["ab"])
         lab_pred = pred["label"].cpu().numpy()
         gt = label.numpy()
@@ -428,7 +429,7 @@ def main():
                     losses = diffusion.training_losses_joint(
                         ddp_model, cond, target, label, t, NUM_CLASSES,
                         lambda_ce=args.lambda_ce, lambda_ab=args.lambda_ab, ab_channels=AB_CH,
-                        self_cond=args.self_cond, self_cond_prob=args.self_cond_prob,
+                        self_cond=args.self_cond, self_cond_prob=args.self_cond_prob, lambda_seg=args.lambda_seg,
                     )
                 loss = (losses["loss"] * weights).mean() / args.grad_accum
                 scaler.scale(loss).backward()

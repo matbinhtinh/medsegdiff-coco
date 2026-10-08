@@ -276,7 +276,9 @@ class GaussianDiffusion:
         if isinstance(model_output, tuple):
             model_output, cal = model_output
         x=x[:,-C:,...]  #loss is only calculated on the target channels, not on the condition image
+        extra = None
         if self.model_var_type not in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
+            extra = model_output[:, C:] if model_output.shape[1] > C else None  # e.g. segmentation logits
             model_output = model_output[:, :C]
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -343,6 +345,7 @@ class GaussianDiffusion:
             "log_variance": model_log_variance,
             "pred_xstart": pred_xstart,
             'cal': cal,
+            'extra': extra,
         }
 
 
@@ -711,7 +714,7 @@ class GaussianDiffusion:
             (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         )  # no noise when t == 0
         sample = mean_pred + nonzero_mask * sigma * noise
-        return {"sample": sample, "pred_xstart": out["pred_xstart"], "cal": out["cal"]}
+        return {"sample": sample, "pred_xstart": out["pred_xstart"], "cal": out["cal"], "extra": out["extra"]}
 
 
     def ddim_reverse_sample(
@@ -1056,7 +1059,7 @@ class GaussianDiffusion:
 
     def training_losses_joint(self, model, cond, x_start, label, t, num_seg_classes,
                               lambda_ce=1.0, lambda_ab=1.0, ab_channels=2, noise=None,
-                              self_cond=False, self_cond_prob=0.5):
+                              self_cond=False, self_cond_prob=0.5, lambda_seg=1.0):
         """
         Joint colorization + segmentation loss (COCO-Stuff).
         :param cond: [N x Cc x H x W] clean condition (L channel).
@@ -1082,6 +1085,8 @@ class GaussianDiffusion:
         else:
             model_input = th.cat((cond, x_t), dim=1)
         model_output, cal = model(model_input, self._scale_timesteps(t))
+        seg_main = model_output[:, x_start.shape[1]:x_start.shape[1] + num_seg_classes].float() \
+            if model_output.shape[1] > x_start.shape[1] else None
         model_output = model_output[:, :x_start.shape[1]].float()
         cal = cal.float()
 
@@ -1105,6 +1110,10 @@ class GaussianDiffusion:
         terms["loss_ab"] = mean_flat((cal_ab - x_start[:, :ab_channels]).abs())
 
         terms["loss"] = terms["loss_diff"] + lambda_ce * terms["loss_ce"] + lambda_ab * terms["loss_ab"]
+        if seg_main is not None:
+            ce_main = F.cross_entropy(seg_main, label, ignore_index=0, reduction="none")
+            terms["loss_seg"] = (ce_main * valid).sum(dim=(1, 2)) / valid.sum(dim=(1, 2)).clamp(min=1.0)
+            terms["loss"] = terms["loss"] + lambda_seg * terms["loss_seg"]
         return terms
 
     def _x0_from_output(self, model_output, x_t, t):

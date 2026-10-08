@@ -89,15 +89,18 @@ def main():
 
     for cond, target, label, names in loader:
         cond = cond.to(dev)
-        samples, cals = [], []
+        samples, cals, segs = [], [], []
         with th.autocast(device_type=dev.type, dtype=amp or th.float32, enabled=amp is not None):
             for _ in range(args.num_ensemble):
-                s, c = sample_joint(diffusion, model, cond, eta=args.eta, self_cond=self_cond)
+                s, c, sg = sample_joint(diffusion, model, cond, eta=args.eta, self_cond=self_cond)
                 samples.append(s.float())
                 cals.append(c.float())
+                if sg is not None:
+                    segs.append(sg)
         sample = th.stack(samples).mean(0)
         cal = th.stack(cals).mean(0)
-        pred = fuse_predictions(sample, cal, alpha_seg=args.alpha_seg, w_ab=args.w_ab)
+        seg = None if not segs else {k: th.stack([g[k] for g in segs]).mean(0) for k in ("first", "mean")}
+        pred = fuse_predictions(sample, cal, alpha_seg=args.alpha_seg, w_ab=args.w_ab, seg=seg)
 
         rgb_pred = lab_to_rgb(cond, pred["ab"])
         rgb_gt = lab_to_rgb(cond, target[:, :2])

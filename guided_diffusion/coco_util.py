@@ -63,7 +63,7 @@ def bits_class_loglik(bits, k=4.0):
         th.einsum("cb,bnhw->nchw", 1 - codes, logp0.transpose(0, 1))
 
 
-def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5, beta_bits=1.0):
+def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5, beta_bits=1.0, seg=None):
     """
     Combine the diffusion sample with the highway calibration head.
     Labels: label_cal (highway argmax), label_diff (hard bit decoding), label_soft
@@ -71,6 +71,9 @@ def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5, beta_bits=1.0):
     Colors: ab_diff, ab_cal and their mix ab.
     :param sample: [B, 10, H, W] final x_0 sample (ab + analog bits).
     :param cal: [B, 185, H, W] raw highway output.
+    :param seg: optional dict from sample_joint with main-UNet segmentation probabilities
+        ("first": at t=T, i.e. from L only; "mean": averaged over all sampling steps).
+        When given, label = argmax of the averaged main-UNet probabilities.
     """
     seg_logits, cal_ab = split_cal(cal.float())
     diff_ab = sample[:, :AB_CH].float()
@@ -82,7 +85,7 @@ def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5, beta_bits=1.0):
     score = logp + beta_bits * bits_class_loglik(bits)
     soft_label = score.argmax(dim=1)
 
-    return {
+    out = {
         "ab_diff": diff_ab,
         "ab_cal": cal_ab.clamp(-1, 1),
         "ab": ((1 - w_ab) * diff_ab + w_ab * cal_ab).clamp(-1, 1),
@@ -91,6 +94,13 @@ def fuse_predictions(sample, cal, alpha_seg=0.5, w_ab=0.5, beta_bits=1.0):
         "label_soft": soft_label,
         "label": soft_label,
     }
+    if seg is not None:
+        for key in ("first", "mean"):
+            probs = seg[key].float().clone()
+            probs[:, 0] = 0
+            out[f"label_main_{key}"] = probs.argmax(dim=1)
+        out["label"] = out["label_main_mean"]
+    return out
 
 
 @th.no_grad()
@@ -99,7 +109,8 @@ def sample_joint(diffusion, model, cond, eta=0.0, progress=False, noise=None, se
     DDIM (eta=0) / DDPM-like (eta=1) sampling over the (possibly respaced) diffusion.
     :param cond: [B, 1, H, W] L channel.
     :param self_cond: feed the previous step's x0 prediction ([cond, x0_prev, x_t] input).
-    :return: (x0 sample [B, 10, H, W], cal of the last step [B, 185, H, W])
+    :return: (x0 sample [B, 10, H, W], cal of the last step [B, 185, H, W],
+              seg: None or {"first", "mean"} main-UNet segmentation probabilities [B, 183, H, W])
     """
     B, _, H, W = cond.shape
     x = th.randn(B, diffusion.target_channels, H, W, device=cond.device) if noise is None else noise
@@ -109,10 +120,16 @@ def sample_joint(diffusion, model, cond, eta=0.0, progress=False, noise=None, se
         from tqdm.auto import tqdm
         indices = tqdm(indices)
     out = None
+    seg_first = seg_sum = None
     for i in indices:
         t = th.full((B,), i, device=cond.device, dtype=th.long)
         inp = th.cat((cond, x0_prev, x), dim=1) if self_cond else th.cat((cond, x), dim=1)
         out = diffusion.ddim_sample(model, inp, t, clip_denoised=True, eta=eta)
         x = out["sample"]
         x0_prev = out["pred_xstart"].to(x.dtype)
-    return x, out["cal"]
+        if out.get("extra") is not None:
+            probs = F.softmax(out["extra"][:, :NUM_CLASSES].float(), dim=1)
+            seg_first = probs if seg_first is None else seg_first
+            seg_sum = probs if seg_sum is None else seg_sum + probs
+    seg = None if seg_sum is None else {"first": seg_first, "mean": seg_sum / len(indices)}
+    return x, out["cal"], seg
