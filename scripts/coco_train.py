@@ -51,6 +51,8 @@ from guided_diffusion.script_util import (
 )
 
 MODEL_KEYS = list(model_and_diffusion_defaults().keys())
+# model/diffusion args that do not change the weights' layout: keep the CLI value on resume
+RUNTIME_KEYS = {"timestep_respacing", "use_checkpoint", "use_fp16", "dpm_solver"}
 
 
 def create_argparser():
@@ -240,7 +242,7 @@ def main():
     if ckpt is not None and ckpt.get("args"):
         # the architecture must match the checkpoint; training hyper-params come from the CLI
         for k in MODEL_KEYS:
-            if k in ckpt["args"] and k != "timestep_respacing":
+            if k in ckpt["args"] and k not in RUNTIME_KEYS:
                 setattr(args, k, ckpt["args"][k])
         log(f"{'resuming' if resume_path else 'initialising'} from {resume_path or init_path} "
             f"(step {ckpt.get('step', 0)}, epoch {ckpt.get('epoch', 0)})")
