@@ -1125,7 +1125,12 @@ class UNetModel_newpreview(nn.Module):
                 emb = emb.squeeze()
             if ind == 0:
                 h = module(h, emb)
-                h = h + th.cat((anch[0], anch[0], anch[1]),1).detach() # 32 + 32 + 64 in 256 res
+                anchors = th.cat((anch[0], anch[0], anch[1]), 1)  # 32 + 32 + 64 in 256 res
+                # MedSegDiff detaches the anchors; a pretrained highway lets the diffusion loss
+                # train its anchor layers too (otherwise they get no gradient at all)
+                if getattr(self.hwm, "detach_anchors", True):
+                    anchors = anchors.detach()
+                h = h + anchors.to(h.dtype)
             else:
                 h = module(h, emb)
             hs.append(h)

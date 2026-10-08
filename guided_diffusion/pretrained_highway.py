@@ -25,6 +25,8 @@ class _ConvGN(nn.Sequential):
 
 
 class PretrainedHighway(nn.Module):
+    detach_anchors = False   # anchors receive gradients from the diffusion loss
+
     def __init__(self, in_channels, out_channels, arch="resnet50", pretrained=True, fpn_ch=128):
         super().__init__()
         weights = {"resnet50": "IMAGENET1K_V2", "resnet34": "IMAGENET1K_V1", "resnet18": "IMAGENET1K_V1"}[arch]
